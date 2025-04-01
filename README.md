@@ -10,7 +10,7 @@ This project involves analyzing a dataset of **skincare product reviews from Sep
 The repository **includes**: 
 1. Raw dataset `.csv`
 2. R Markdown `.rmd`
-3. Output `.html`
+3. Output `.html` and `.pdf`
 
 The analysis will identify key themes and categories in customer feedback, such as product effectiveness and user satisfaction. Through classification, the project will uncover factors influencing customer satisfaction and enhance our understanding of customer preferences. This will enable further business analytics and correlation analysis, linking reviews with factors like product type, price, and brand. These insights will be valuable for product development, marketing strategies, and customer engagement. Additionally, the approach is well-suited for classifying and analyzing large-scale, unseen reviews.
 
