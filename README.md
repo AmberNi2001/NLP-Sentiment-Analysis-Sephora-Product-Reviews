@@ -37,7 +37,7 @@ Subset the dataset to only **10,000 observations**, classify reviews based on ra
 
 ### Summary Analysis
 
-Create a word cloud to visualize the most frequent terms across the dataset, helping to understand key themes and common words in customer reviews. 
+Create a **word cloud** to visualize the most frequent terms across the dataset, helping to understand key themes and common words in customer reviews. 
 
 <img width="632" alt="Screenshot 2025-04-01 at 4 03 11 PM" src="https://github.com/user-attachments/assets/6476f182-f58b-43ea-ac55-87609249e01e" />
 
@@ -54,7 +54,7 @@ Create a word cloud to visualize the most frequent terms across the dataset, hel
 
 #### K-means clustering 
 
-Perform K-means clustering to group the reviews into different clusters based on the similarity of the words used in the reviews. Choose the optimal K using Elbow Method.
+Perform K-means clustering to group the reviews into different clusters based on the similarity of the words used in the reviews. Choose the optimal K using Elbow Method. Without labels guiding the clustering, K-means cannot differentiate sentiment effectively if the features are not well-separated and the languages are sometimes vague and not straightforward. It doesn’t have the context of class labels to guide the separation, leading to unsatisfied cluster quality.
 
 #### Topic Modeling (Latent Dirichlet Allocation)
 
