@@ -1,0 +1,738 @@
+---
+title: "PPOL 6081 - Problem Set 2"
+author: "Amber Ni"
+date: "2025-03-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, warning = FALSE)
+rm(list=ls())
+setwd("~/Desktop/Grad/25Spring/Text As Data/TAD_PS2") 
+getwd()
+
+# Load required packages
+pacman::p_load(tidyverse, quanteda, quanteda.corpora, quanteda.textstats, quanteda.textmodels, rjson, caret, dplyr, textclean, glmnet, e1071)
+```
+
+In this problem set, I am working with a dataset of skincare product reviews from the Sephora online store, which I obtained from Kaggle. https://www.kaggle.com/datasets/nadyinky/sephora-products-and-skincare-reviews/data. 
+
+## My dataset
+
+```{r 1.0}
+reviews <- read.csv("reviews_0-250.csv")
+```
+
+## Select categories & Split data into train/test sets
+
+```{r 2.0}
+# Get a subset of 10000 observations
+set.seed(123)
+reviews_subset <- reviews %>% slice_sample(n = 10000)
+
+# Classify reviews into three categories
+reviews_subset <- reviews_subset %>%
+    mutate(review_type = case_when(
+    rating %in% c(4, 5) ~ "Positive",
+    rating == 3 ~ "Neutral",
+    rating %in% c(1, 2) ~ "Negative"
+  ))
+
+# Check the class distribution
+prop.table(table(reviews_subset$review_type))
+
+# Only keep texts and categories for simplicity
+reviews_samp <- reviews_subset %>%
+  select(review_text, review_title, review_type) 
+
+# Split the data into training and test sets
+set.seed(1310)
+
+prop_train <- 0.8
+ids <- 1:nrow(reviews_samp)  # Create an index for all rows
+ids_train <- sample(ids, ceiling(prop_train * length(ids)), replace = FALSE) # Randomly sample indices for training data
+ids_test <- ids[-ids_train] # Remaining indices for test data
+
+train_set <- reviews_samp[ids_train, ]
+test_set <- reviews_samp[ids_test, ]
+```
+
+## Pre-processing
+
+```{r 3.0}
+# Check a few reviews to see the nature of the texts
+head(train_set$review_text, n =3)
+
+# Remove common English contractions and avoid empty spaces being recognized by a token
+reviews_samp$review_text <- gsub("'s|'m|'re|'d|'ve|'ll|n't|’s|’m|’re|’d|’ve|’ll|n’t", "", reviews_samp$review_text)
+train_set$review_text <- gsub("'s|'m|'re|'d|'ve|'ll|n't|’s|’m|’re|’d|’ve|’ll|n’t", "", train_set$review_text)
+test_set$review_text <- gsub("'s|'m|'re|'d|'ve|'ll|n't|’s|’m|’re|’d|’ve|’ll|n’t", "", test_set$review_text)  
+
+# Clean texts using textclean
+reviews_samp$review_text <- reviews_samp$review_text %>%
+  replace_contraction() %>%  
+  replace_word_elongation() %>%  
+  replace_symbol() %>%  
+  replace_number() %>%  
+  replace_non_ascii() 
+
+train_set$review_text <- train_set$review_text %>%  
+  replace_contraction() %>%  
+  replace_word_elongation() %>%  
+  replace_symbol() %>%  
+  replace_number() %>%  
+  replace_non_ascii() 
+
+test_set$review_text <- test_set$review_text %>%  
+  replace_contraction() %>%  
+  replace_word_elongation() %>%  
+  replace_symbol() %>%  
+  replace_number() %>%  
+  replace_non_ascii()
+
+# Convert to a document-feature matrix (DFM)
+reviews_dfm <- tokens(reviews_samp$review_text, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  dfm() %>%
+  dfm_wordstem() %>%
+  dfm_remove(stopwords("en"))
+
+# Repeat preprocessing steps for train set
+train_dfm <- tokens(train_set$review_text, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  dfm() %>%
+  dfm_wordstem() %>%
+  dfm_remove(stopwords("en"))
+
+# Repeat preprocessing steps for test set
+test_dfm <- tokens(test_set$review_text, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  dfm() %>%
+  dfm_wordstem() %>%
+  dfm_remove(stopwords("en"))
+
+# Check top features of each DFM
+topfeatures(train_dfm)
+topfeatures(test_dfm)
+
+# Inspect the DFM
+as.matrix(train_dfm)[1:5, 1:5]
+as.matrix(test_dfm)[1:5, 1:5]
+
+# Ensure that test set DFM has the same features as training set DFM
+test_dfm <- dfm_match(test_dfm, features = featnames(train_dfm))
+```
+
+## Descriptive statisitcs: products and brands
+
+```{r}
+
+samp_brand <- reviews_subset %>%
+    select(review_text, review_title, review_type, brand_name) 
+
+# # Count the number of positive and negative reviews per brand
+# brand_sum <- samp_brand %>%
+#   group_by(brand_name, review_type) %>%
+#   summarise(count = n()) %>%
+#   ungroup()
+# 
+# # Find the top 5 brands with the most positive reviews
+# toppos_brands <- brand_sum %>%
+#   filter(review_type == "Positive") %>%
+#   arrange(desc(count)) %>%
+#   slice_head(n = 5)
+# 
+# topneg_brands <- brand_sum %>%
+#   filter(review_type == "Negative") %>%
+#   arrange(desc(count)) %>%
+#   slice_head(n = 5)
+
+# Count the total number of reviews per brand
+brand_total <- samp_brand %>%
+  group_by(brand_name) %>%
+  summarise(total_reviews = n())
+
+# Count the number of positive and negative reviews per brand
+brand_reviews <- samp_brand %>%
+  group_by(brand_name, review_type) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+# Merge the total reviews with the positive/negative counts
+brand_reviews <- merge(brand_reviews, brand_total, by = "brand_name")
+
+# Calculate the proportion of positive and negative reviews
+brand_reviews <- brand_reviews %>%
+  mutate(proportion = count / total_reviews)
+
+# Find the top 5 brands with the highest proportion of positive reviews
+toppos_prop <- brand_reviews %>%
+  filter(review_type == "Positive") %>%
+  arrange(desc(proportion)) %>%
+  slice_head(n = 5)
+
+# Find the top 5 brands with the highest proportion of negative reviews
+topneg_prop <- brand_reviews %>%
+  filter(review_type == "Negative") %>%
+  arrange(desc(proportion)) %>%
+  slice_head(n = 5)
+```
+
+
+## Review Word Clouds
+
+```{r 4.0}
+
+# Load package necessary to create word clouds
+pacman::p_load(quanteda.textplots)
+
+# Create a word cloud for reviews 
+
+reviews_wordcloud <- dfm_remove(reviews_dfm, c("skin", "product", "feel", "use", "just", "veri"))
+
+reviewsWordcloud <- textplot_wordcloud(reviews_wordcloud, random_order = FALSE,
+                   rotation = .25, max_words = 100,
+                   min_size = 0.5, max_size = 2.8,
+                   colors = RColorBrewer::brewer.pal(8, "Dark2"))
+
+```
+
+## TF-IDF: Words that differentiate between review types
+
+```{r 4.1}
+
+library(quanteda.textstats)
+
+# Subset my original dataset according to different review types
+reviews_pos <- reviews_samp %>%
+  filter(review_type == "Positive")
+
+reviews_neg <- reviews_samp %>%
+  filter(review_type == "Negative")
+
+reviews_neu <- reviews_samp %>%
+  filter(review_type == "Neutral")
+
+# Pre-processing 
+
+# Remove common English contractions and avoid empty spaces being recognized by a token
+reviews_neu$review_text <- gsub("'s|'m|'re|'d|'ve|'ll|n't|’s|’m|’re|’d|’ve|’ll|n’t", "", reviews_neu$review_text)
+reviews_neg$review_text <- gsub("'s|'m|'re|'d|'ve|'ll|n't|’s|’m|’re|’d|’ve|’ll|n’t", "", reviews_neg$review_text)
+reviews_pos$review_text <- gsub("'s|'m|'re|'d|'ve|'ll|n't|’s|’m|’re|’d|’ve|’ll|n’t", "", reviews_pos$review_text)
+
+# Clean texts using textclean
+reviews_neu$review_text <- reviews_neu$review_text %>%
+  replace_contraction() %>%  
+  replace_word_elongation() %>%  
+  replace_symbol() %>%  
+  replace_number() %>%  
+  replace_non_ascii() 
+
+reviews_neg$review_text  <- reviews_neg$review_text %>%  
+  replace_contraction() %>%  
+  replace_word_elongation() %>%  
+  replace_symbol() %>%  
+  replace_number() %>%  
+  replace_non_ascii() 
+
+reviews_pos$review_text <- reviews_pos$review_text %>%  
+  replace_contraction() %>%  
+  replace_word_elongation() %>%  
+  replace_symbol() %>%  
+  replace_number() %>%  
+  replace_non_ascii()
+
+# Convert to a document-feature matrix (DFM)
+reviews_pos_dfm <- tokens(reviews_pos$review_text, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  dfm() %>%
+  dfm_wordstem() %>%
+  dfm_remove(stopwords("en"))
+
+reviews_neg_dfm <- tokens(reviews_neg$review_text, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  dfm() %>%
+  dfm_wordstem() %>%
+  dfm_remove(stopwords("en"))
+
+reviews_neu_dfm <- tokens(reviews_neu$review_text, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  dfm() %>%
+  dfm_wordstem() %>%
+  dfm_remove(stopwords("en"))
+
+# Proportional TF and log-scaled IDF for positive comments 
+tfidf_pos <- reviews_pos_dfm %>%
+  dfm_tfidf(scheme_tf = "prop", scheme_df = "inversemax")  
+
+# Proportional TF and log-scaled IDF for neutral comments 
+tfidf_neu <- reviews_neu_dfm %>%
+  dfm_tfidf(scheme_tf = "prop", scheme_df = "inversemax")  
+
+# Proportional TF and log-scaled IDF for negative comments 
+tfidf_neg <- reviews_neg_dfm %>%
+  dfm_tfidf(scheme_tf = "prop", scheme_df = "inversemax")  
+
+# Get top words
+top_pos <- textstat_frequency(tfidf_pos, n = 10, force = TRUE)  # Top 10 words
+top_pos <- top_pos %>% select(feature, frequency) # Keeps only the word (feature) and its TF-IDF frequency
+
+top_neu <- textstat_frequency(tfidf_neu, n = 10, force = TRUE) 
+top_neu <- top_neu %>% select(feature, frequency)
+
+top_neg <- textstat_frequency(tfidf_neg, n = 10, force = TRUE) 
+top_neg <- top_neg %>% select(feature, frequency)
+
+# This gives us top words that are most distinctive for each group based on TF-IDF values.
+
+print(top_pos)
+print(top_neg)
+print(top_neu)
+
+```
+```
+
+
+## Different machine learning models
+
+### NAIVE BAYES WITH SMOOTHING
+
+```{r 5.0}
+
+# Train a Naive Bayes model with Laplace smoothing (smooth = 1)
+nb_model_sm <- textmodel_nb(train_dfm, train_set$review_type, smooth = 1, prior = "uniform")
+summary(nb_model_sm)
+
+# Predict on the test set with smoothed model
+predicted_class_sm <- predict(nb_model_sm, newdata = test_dfm)
+
+# Confusion matrix for the smoothed model
+tabclass_sm <- table(test_set$review_type, predicted_class_sm) 
+confusionMatrix(tabclass_sm, mode = "everything") # from caret package in R
+
+```
+
+The Naive Bayes model achieved **an overall accuracy of 85.2%**, indicating strong general performance in predicting class labels. The **Kappa score of 0.4443** suggests moderate agreement between predictions and actual labels beyond random chance. 
+
+The model performs exceptionally well for the **Positive Class**, with **a high sensitivity of 0.9062, precision of 0.9465, and an F1 score of 0.9259**. This demonstrates its effectiveness in correctly identifying positive samples. However, performance for the **Neutral Class** is poor, with **sensitivity at 0.4342, precision at 0.2157, and an F1 score of 0.2882**, which indicates difficulty distinguishing neutral instances from others. The **Negative Class** shows moderate performance with balanced performance statistics.
+
+```{r 5.1}
+# Investigate the most discriminative features
+posterior <- tibble(
+  feature = colnames(nb_model_sm$param),
+  Negative = t(nb_model_sm$param)[, 1],
+  Neutral = t(nb_model_sm$param)[, 2],
+  Positive = t(nb_model_sm$param)[, 3]
+)
+head(t(nb_model_sm$param))
+```
+
+Based on the most discriminative features we examined, words like **"immediately," "brighten," and "smooth"** are strongly associated with the **Positive Class**. This aligns with our expectation that these positive comments related to skincare product effectiveness are clear indicators of positive sentiment. Conversely, words like **"just"** are more closely associated with the **Neutral and Negative Classes**, probably reflecting complaint-like expressions and moderate emotions, which also matches our assumptions. There are no obvious words that are incorrectly contributing to the wrong class.
+
+```{r 5.2}
+# Top 10 most predictive features
+# posterior %>% arrange(-Negative) %>% head(10)
+# posterior %>% arrange(-Neutral) %>% head(10)
+# posterior %>% arrange(-Positive) %>% head(10)
+
+posterior <- posterior %>%
+  mutate(
+    positive_vs_negative = log(Positive / Negative),
+    positive_vs_neutral  = log(Positive / Neutral),
+    negative_vs_neutral  = log(Negative / Neutral)
+  )
+posterior %>%
+  arrange(-positive_vs_negative) %>%
+  head(10)
+
+```
+I then examined the 10 most predictive features in each categories. However same words appear across multiple classes, because they’re common words related to the general topic, which makes it harder to tell which category a word really signals. I changed to use the ratios, instead of just looking at how frequent a word is in one class, to examine how much more likely it is to appear in one class compared to another. 
+
+The results show that most of the words commonly associated with skincare effectiveness, such as **"smooth," "soft," "perfect," "sooth,"** and **"smoother,"** tend to have higher probabilities of appearing in the **Positive** class. This is evident from the high `positive_vs_negative` and `positive_vs_neutral` scores, suggesting that users who are satisfied with skincare products frequently use these descriptors to describe their experiences. Consumers, when buying with skincare products, seemingly care more about smoothing effect and product texture. 
+
+### REGULARIZATION (LASSO)
+
+```{r 6.0}
+
+# Convert class labels to factors; set reference class
+train_set$positive <- fct_relevel(as_factor(train_set$review_type), "Positive")
+test_set$positive <- fct_relevel(as_factor(test_set$review_type), "Positive")
+
+# Build the LASSO model
+lasso <- cv.glmnet(
+  x = train_dfm, y = train_set$positive,
+  family = "multinomial", alpha = 1, nfolds = 5, #  Logistic regression (binomial); Lasso (alpha = 1); 5-fold Cross-Validation
+  intercept = TRUE, type.measure = "class"
+)
+
+# Plot the lambda values
+plot(lasso) # check out optimal lambda
+
+# See Lasso model result
+lasso
+
+# Extract the lambda values
+best_lambda_min <- lasso$lambda.min  # Optimal lambda (minimum error)
+
+# Print the values
+print(best_lambda_min)
+
+# Predict on the test set
+predicted_lasso <- predict(lasso, newx = test_dfm, s = best_lambda_min, type = "class")
+
+# Confusion matrix for Lasso to evaluate preformance
+tabclass_lasso <- table(fct_rev(test_set$positive), predicted_lasso)
+print(tabclass_lasso)
+
+lasso_cmat <- confusionMatrix(tabclass_lasso, mode = "everything")
+print(lasso_cmat)
+```
+
+The LASSO regularized logistic regression model achieved an overall accuracy of **86.85%**, which shows a slight improvement compared to the Naive Bayes model’s performance (an overall accuracy of **85.2**). The model's Kappa score of **0.4505** indicates moderate agreement between predictions and actual labels, slightly better than the Bayes model.
+
+The model demonstrates strong predictive power for the **Positive Class**, with high sensitivity (**0.8934**), precision (**0.9723**), and an impressive F1 score of **0.9312**. However, similar to the Naive Bayes model, performance for the **Neutral Class** remains poor, with low precision (**0.2418**) and an F1 score of **0.3289**, indicating difficulty in accurately identifying neutral samples. The **Negative Class** shows moderate performance, with a precision of **0.4511** and an F1 score of **0.5497**. Generally speaking, most performance statistics of the LASSO model are better than the Naive Bayes model.
+
+### REGULARIZATION (Ridge)
+
+```{r 6.1}
+
+
+# Train a Ridge regression model (alpha = 0 for Ridge)
+ridge <- cv.glmnet(
+  x = train_dfm, y = train_set$positive,
+  family = "multinomial", alpha = 0, nfolds = 5,
+  intercept = TRUE, type.measure = "class"
+)
+
+# Predict on the test set
+predicted_ridge <- predict(ridge, newx = test_dfm, type = "class")
+
+# Confusion matrix for Ridge
+tabclass_ridge <- table(fct_rev(test_set$positive), predicted_ridge)
+ridge_cmat <- confusionMatrix(tabclass_ridge, mode = "everything")
+
+# Print Ridge results
+print(ridge_cmat)
+
+```
+
+The **Ridge regularized logistic regression model** achieved an overall accuracy of **83.55%**, which is slightly lower compared to both the **LASSO model (86.85%)** and the **Naive Bayes model (85.2%)**. The model's Kappa score of **0.049** indicates very low agreement between predictions and actual labels. 
+
+The model shows strong predictive power for the **Positive Class**, with high sensitivity (**0.8355**), precision (**0.9988**), and a F1 score of **0.9099**. However, the performance of the model for the **Negative Class** is exceptionally poor, with a precision of only **0.0380** and an F1 score of **0.0729**. The **Neutral Class** also performs poorly, with a precision of **0.0196** and an F1 score of **0.0382**. It indicates that it rarely captures neutral and negative reviews accurately. 
+
+Overall, the **Ridge model** appears to be overly focused on correctly predicting the **Positive Class**, probably due to the fact that it is the most dominant class. Its poor performance for the **Negative and Neutral Classes** makes it seemingly unsuitable for scenarios where a balanced prediction across categories is desired. Both the **LASSO and Naive Bayes models** show better handling of class imbalances.
+
+### Comparison: Naive Bayes vs. LASSO vs. Ridge 
+
+```{r 7.0}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Create a data frame for comparison
+model_comparison <- data.frame(
+  Metric = c("Overall Accuracy", "Kappa", 
+             "Precision (Positive)", "Sensitivity (Positive)", "F1 Score (Positive)",
+             "Precision (Negative)", "Sensitivity (Negative)", "F1 Score (Negative)",
+             "Precision (Neutral)", "Sensitivity (Neutral)", "F1 Score (Neutral)"),
+  Naive_Bayes = c(0.852, 0.4443, 
+                  0.9465, 0.9062, 0.9259,
+                  0.5272, 0.5187, 0.5229,
+                  0.2157, 0.4342, 0.2882),
+  LASSO = c(0.8685, 0.4505,
+            0.9723, 0.8934, 0.9312,
+            0.4511, 0.7034, 0.5497,
+            0.2418, 0.5139, 0.3289),
+  Ridge = c(0.8355, 0.049,
+            0.9988, 0.8355, 0.9098,
+            0.03804, 0.8750, 0.07292,
+            0.01961, 0.7500, 0.03822)
+)
+
+# Convert to long format for plotting
+comparison_long <- model_comparison %>%
+  pivot_longer(cols = c("Naive_Bayes", "LASSO", "Ridge"), 
+               names_to = "Model", values_to = "Value")
+
+# Plotting
+ggplot(comparison_long, aes(x = Metric, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  labs(title = "Performance Comparison: Naive Bayes vs. LASSO vs. Ridge",
+       fill = "Model") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+The comparison graph clearly shows that, generally speaking, the **LASSO model** outperforms both the **Naive Bayes model** and the **Ridge model** across most metrics, particularly in terms of overall accuracy and Kappa score. While all three models are effective at predicting the **Positive Class**, which is likely due to the strong presence of positive sentiment and easily identifiable keywords, the **Ridge model** achieves the highest precision for positive reviews- but it may be overfitting to the positive class. 
+
+Performance for the **Negative Class** is moderate across all models, with the **Ridge model** showing a particularly low F1 score, indicating poor recall despite a high precision. Both the **Naive Bayes model** and **LASSO model** handle negative predictions better. All three models struggle significantly with predicting the **Neutral Class**. The **LASSO model** provides the most balanced performance, but still, its F1 score for the **Neutral Class**. This is likely because negative and especially neutral language tends to be more subtle, ambiguous, and harder to detect and differentiate from other classes. The lack of clear indicators for neutral sentiments further complicates accurate classification.
+
+### K-means clustering
+
+```{r 8.0}
+
+dfm_reviews_prop <- dfm_weight(reviews_dfm, scheme = "prop") 
+
+# ------ k-means
+n.clust <- 7 # choose the number of clusters (I identified 7 as the optimal k after using the elbow method below)
+
+# estimate clusters - group documents into 7 clusters based on word patterns in the DFM
+set.seed(2025)
+k_cluster <- kmeans(dfm_reviews_prop, centers = n.clust)
+
+# view the structure of the clustering output
+str(k_cluster)
+
+## show the assigned cluster for each document
+# k_cluster$cluster
+
+# number of documents assigned to each cluster
+table(k_cluster$cluster) 
+
+```
+
+The K-means clustering analysis grouped the dataset into **7 distinct clusters**. The **total within-cluster sum of squares (tot.withinss)** is **489**, which measures the compactness of the clusters — lower values indicate tighter, more cohesive clusters. Meanwhile, the **between-cluster sum of squares (betweenss)** is **36.8**, suggesting a relatively small separation between clusters. It suggests that some clusters may overlap, particularly if the features are not well-separated. The sizes of the clusters range from **481 to 4308 samples**, indicating an imbalanced distribution. 
+
+That's likely because most of our reviews belong to the Positive Class. Additionally, words and sentiments from the Neutral and Negative Classes tend to be more subtle and harder to detect, making them difficult to group into distinct clusters. As a result, these reviews are more likely to be misclassified or wrongly grouped, leading to overlap between clusters. The ambiguity in language and lack of strong indicator words for the Negative and Neutral Classes can contribute to the confusion and may negatively impact classification performance.
+
+```{r 8.1}
+
+# ----- labeling the clusters
+
+# identify the 10 most important words for each cluster based on cluster center values
+top_words_per_cluster <- matrix(NA, nrow = n.clust, ncol = 10) # to store 10 most important words for each cluster
+
+# extract the most important ones
+for(z in 1:n.clust) {
+  top_words_per_cluster[z,] <- colnames(reviews_dfm)[order(k_cluster$center[z,], decreasing = TRUE)[1:10]]
+}
+
+cluster_keywords <- top_words_per_cluster%>% 
+  as_tibble() %>% 
+  pivot_longer(cols = contains("V"), names_to = "cluster", values_to = "words") %>% 
+  group_by(cluster) %>% 
+  summarise(words = list(words)) %>% 
+  mutate(words = map(words, paste, collapse = ", ")) %>% 
+  unnest()
+
+print(cluster_keywords)
+
+# create a tibble linking each document to its assigned cluster
+clusters <- tibble(text = names(k_cluster$cluster), cluster = as.character(k_cluster$cluster))
+
+# combine document metadata with clustering results
+df_clusters <- bind_cols(as_tibble(docvars(reviews_dfm)), clusters)
+
+#  add the original reviews back into the dataset
+df_clusters$review_text <- reviews_samp$review_text
+
+# see a random sample of 5 reviews from each cluster 
+set.seed(2025)
+df_clusters %>%
+  group_by(cluster) %>%
+  sample_n(5) %>%  
+  select(cluster,review_text) %>%
+  print()
+
+df_clusters %>%
+  count(cluster) %>%
+  arrange(n)  # Sort by smallest cluster
+
+```
+
+The identified keywords across the clusters reveal a significant amount of overlap and similarity, suggesting that the it is hard for clustering algorithm to distinctly separate meaningful topics. Common words like **"love", "feel", "skin", "use", "moistur", "product"**, and **"like"** appear repeatedly across multiple clusters. This overlap could be due to the high frequency of general words and plain languages used in reviews. Additionally, some keywords are nearly identical in meaning or context (e.g., “moistur” and “hydration”), probably due to the nature of skincare product reviews, which further complicates the differentiation process.
+
+The sampled reviews from each cluster provide some insights into how the K-means algorithm grouped the data. Similar to the keywords investigation, there is a high frequency of positive reviews across clusters, with many comments expressing satisfaction and enthusiasm for the products. This observation aligns well with the keyword analysis, where words like **"love", "feel", "skin", "moistur", "product"**, and **"use"** are recurrent and overlap between clusters. Additionally, some clusters contain **reviews about specific product experiences** (e.g., makeup removal, moisturizers, etc.), but the lack of clear separation between clusters suggests that the K-means algorithm is primarily detecting general positive sentiment rather than identifying nuanced topics or themes. 
+
+The frequent appearance of positive-sentiment words across various clusters supports the previous observation that Positive Class reviews are more easily identified, whereas Neutral and Negative Class reviews remain underrepresented and hard to distinguish. I think in this case, unsupervised learning methods like k-means clustering might not be ideal. Without labels guiding the clustering, K-means cannot differentiate sentiment effectively if the features are not well-separated and the languages are sometimes vague and not straightforward. It doesn't have the context of class labels to guide the separation, leading to unsatisfied cluster quality. As K-means relies on distance-based similarity, it is hard for it to distinguish nuanced language patterns or low-frequency words.
+
+```{r 8.2}
+# ---- Elbow method 
+dfm_matrix <- as.matrix(dfm_reviews_prop)
+
+# Define a range of k values to test
+k_values <- 2:17
+wss_values <- numeric(length(k_values))  # within-cluster sum of squares
+
+# Compute WSS for each k
+set.seed(2025)
+for (i in seq_along(k_values)) {
+  kmeans_result <- kmeans(dfm_matrix, centers = k_values[i], nstart = 5)
+  wss_values[i] <- kmeans_result$tot.withinss
+}
+
+# plot
+elbow_df <- data.frame(k = k_values, wss = wss_values)
+ggplot(elbow_df, aes(x = k, y = wss)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Elbow Method for Optimal k",
+       x = "Number of clusters (k)",
+       y = "Within-cluster sum of squares") +
+theme_minimal()
+
+```
+
+To determine the optimal number of clusters (**k**) for my K-means clustering, I applied the **Elbow Method** by plotting the within-cluster sum of squares against various values of **k**. I experimented with three different settings of the **nstart** parameter: **nstart = 1**, **nstart = 5 (twice)** on **range 2 to 15 (twice)** to **range 2 to 17**, which controls the number of random nationalizations for K-means. The plots show a gradual decrease in within-cluster sum of squares as **k** increases, but the rate of improvement slows down around **k = 7**. At this point, the curve starts to flatten out.
+
+### SVM
+
+```{r 9.0}
+
+# Convert dfm to matrix
+train_matrix <- as.matrix(train_dfm) 
+test_matrix <- as.matrix(test_dfm)
+
+str(train_matrix)
+str(test_matrix)
+
+dim(train_matrix)
+dim(test_matrix)
+
+levels(train_set$review_type)
+levels(test_set$review_type) 
+
+train_set$review_type <- factor(train_set$review_type)
+test_set$review_type <- factor(test_set$review_type, levels = levels(train_set$review_type))
+
+# Fit a SVM model
+svm_tuned <- tune(
+  svm,
+  train.x = train_matrix,
+  train.y = as.factor(train_set$review_type),
+  kernel = "linear",
+  ranges = list(cost = c(0.1, 1, 10)), # trying multiple values of the cost parameter
+  tunecontrol = tune.control(cross = 5)  
+)
+
+svm_model <- svm_tuned$best.model 
+
+# predictions and confusion matrix as you had it
+predicted_test_svm <- predict(svm_model, newdata = test_matrix)
+confusionMatrix(predicted_test_svm, test_set$review_type)
+
+```
+Just out of curiosity, I also tried the SVM model, which turns out to have the lowest overall accuracy compared to my precious supervised learning model.
+
+## Topic modeling
+
+```{r 10.0}
+
+library(topicmodels)
+
+# Clean dfm - remove some common topic-unrelated words
+custom_stopwords <- c("use", "like", "product", "feel", "love", "good", "realli", "get", "make", "tri", "work", "veri", "just", "day", "look", "even", "great", "much", "becaus", "never", "skin", "give", "now", "littl", "can", "one", "also", "think", "although")
+dfm_cleaned <- dfm_remove(reviews_dfm, pattern = custom_stopwords)
+
+# Convert dfm to dtm
+dtm_cleaned <- convert(dfm_cleaned, to = "topicmodels")
+
+# Apply LDA
+reviews_lda <- LDA(dtm_cleaned, k = 4, control = list(seed = 1234), alpha = 0.1, eta = 0.1) 
+reviews_lda
+terms(reviews_lda, 10)
+
+#  ---- STEP 0: Visualize the topic distribution
+
+# Get the distribution of each document across all topics
+topic_distributions <- as.data.frame(posterior(reviews_lda)$topics)
+
+# Count occurrences of each topic (based on the highest probability per document)
+topic_distribution_counts <- topic_distributions %>%
+  mutate(Dominant_Topic = apply(., 1, which.max)) %>%  # Find the most dominant topic for each document
+  group_by(Dominant_Topic) %>%  # Group by dominant topic
+  summarise(Count = n())  # Count the number of documents for each topic
+
+ggplot(topic_distribution_counts, aes(x = factor(Dominant_Topic), y = Count, fill = factor(Dominant_Topic))) +
+  geom_bar(stat = "identity", width = 0.6) +
+  labs(title = "Distribution of Documents Across Topics",
+       x = "Topic", y = "Number of Documents") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+#  ---- STEP 1: Extract Word-Topic Probabilities ("Beta")  
+# (identify the most representative words for each topic)
+library(tidytext)
+# Extract word-topic probabilities
+reviews_topics <- tidy(reviews_lda, matrix = "beta")
+head(reviews_topics)
+
+# ----- STEP 2: Visualize the Top Words in Each Topic  
+
+reviews_top_terms <- reviews_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>% 
+  ungroup() %>%
+  arrange(topic, -beta)
+
+# Plot top words per topic
+reviews_top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered() +
+  labs(title = "Top Words in Each Topic", x = "Word Probability (Beta)", y = "Word") +
+  theme_minimal()
+
+```
+
+The topic modeling results show four distinct categories based on the most frequent words within each topic. The bar chart shows a fairly balanced distribution of documents across the four topics, indicating that each topic is represented with a similar number of documents, suggesting no particular topic is disproportionately dominating the dataset. By looking at the the top words for four categories, we can identify:
+
+- **Topic 1:** This topic focuses on *moisturizing and skin texture*. Key words like "moistur," "dri," "well," and "smell" suggest it relates to how well products keep the skin moisturized and help with dryness. 
+- **Topic 2:** This topic emphasizes *acne treatment and sensitivity*. Words like "face," "moistur," "acn," and "sensit" suggest discussions around facial skincare routines like acne treatment, and addressing sensitive skin. 
+- **Topic 3:** This topic is about *product texture and makeup compatibility*. Words like "cream," "makeup," "textur," and "recommend" suggest reviews about how well skincare products work with makeup or their texture and feel. 
+- **Topic 4:** This topic highlights *hydration and smoothness*. Terms like "doe," "hydration," "smooth," and "differ" suggest a focus on how effective the products are at providing hydration, making skin smooth, and showing noticeable differences. But this
+
+Overall, the topic modeling has successfully identified categories related to skincare, especially focusing on product effectiveness, sensitive and problematic skin care, compatibility with makeup, and general skin texture. We still saw great overlap of words like "moistur" and "face" across multiple topics indicates some redundancy or lack of distinctiveness between topics. Also I noticed that most of the words related to product effectiveness are positive, aligning with the fact that the most dominant category in the corpus is Positive Class.
+
+```{r 10.1}
+
+# ----- STEP 3: Identify Words that Differentiate the Most Between the Four Topics  
+
+beta_wide <- reviews_topics %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  pivot_wider(names_from = topic, values_from = beta) %>% 
+  filter(topic1 > .001 | topic2 > .001 | topic3 > .001 | topic4 > .001) %>% 
+  rowwise() %>%
+  mutate(
+    # Identify the topic with the highest and lowest probability for each word
+    max_topic = which.max(c_across(starts_with("topic"))),  # Highest probability topic
+    min_topic = which.min(c_across(starts_with("topic"))),  # Lowest probability topic
+    
+    # Get the highest and lowest probabilities
+    max_prob = max(c_across(starts_with("topic"))),
+    min_prob = min(c_across(starts_with("topic"))),
+    
+    # Calculate log-ratio between the max and min probability
+    log_ratio = log2(max_prob / min_prob)
+  ) %>%
+  ungroup()
+
+# Select top 15 words with highest absolute log-ratio
+top_words <- beta_wide %>%
+  filter(max_prob > 0.001) %>%
+  arrange(desc(log_ratio)) %>%
+  slice_head(n = 15)
+print(top_words)
+
+# Visualize Words That Differentiate Topics  
+# ggplot(top_words, aes(x = reorder(term, log_ratio), y = log_ratio, fill = as.factor(max_topic))) +
+  # geom_col() +
+  # coord_flip() +  # Flip for better readability
+  # labs(
+    # title = "Words That Differentiate Topics",
+    # x = "Word",
+    # y = "Log2 Ratio (Max Topic / Min Topic)"
+  # ) +
+  # scale_fill_manual(values = RColorBrewer::brewer.pal(4, "Dark2"), 
+                   # labels = c("Topic 1", "Topic 2", "Topic 3", "Topic 4")) +
+  # theme_minimal()
+
+```
+
+When I firstly looked at the the graph illustrating the most distinguishing words associated with each of the four topics derived from the topic modeling process. Though each topic appears to capture a different aspect of user reviews, it didn't really align with the four topics we identified earlier using top words. Also, it is hard for us to identify specific patterns from these words that can inform us some business insights. That's because some words here have high log-ratios but very low probabilities - meaning they may only appear once or twice. They're distinct, but not necessarily meaningful. So after adding a filtering on `max_prob` , we now can look at distinct words but that also appear with at least some higher frequency. Also, I deleted visualization here but only looked at the table for better interpretation.
+
+Based on the results, we are identifying words that are distinctive and have relatively higher frequencies within certain topics, which can give us more nuances to our previously identified projects. For example, in **Topic 1**, words like "bag", "differ", "fragranc", and "daili" are prominent. Previously, Topic 1 was associated with **moisturizing and skin texture** (based on words like "moistur", "dri", "well", and "smell"). If we combine these findings, Topic 1 seems to be about **daily skincare routines and moisturizing products**—items you can put in a bag, use daily, and that make a difference in skin feel or texture. Similarly, **Topic 2** was previously identified as related to **acne treatment and sensitivity**, based on words such as "face", "moistur", "acn", and "sensit". Here, words like "year", "plus", and "complimentari" appear as distinctive terms, suggesting this topic might be about **long-term use and complimentary offers associated with acne treatment products**, which also makes sense as consumers often look for products that provide lasting results and may be attracted by complimentary samples or special deals related to acne treatment.
+
